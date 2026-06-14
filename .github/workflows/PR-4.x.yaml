@@ -1,55 +1,126 @@
 name: PR:4.x
 
 on:
-  pull_request:
-    branches:
-      - 4.x
+    pull_request:
+        branches:
+            - 4.x
+
+concurrency:
+    group: OCV-PR-Linux-${{ github.ref }}
+    cancel-in-progress: true
 
 jobs:
+    Ubuntu:
+        # runs on incredibuild runner after repo is register in the ica ui
+        runs-on: incredibuild-runner
+        permissions:
+            contents: read
 
-  Linux:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-Linux.yaml@main
-    with:
-      workflow_branch: main
+        defaults:
+            run:
+                shell: bash
+        container:
+            image: "quay.io/opencv-ci/opencv-ubuntu-24.04:20251127"
 
-  Windows:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-Windows.yaml@main
-    with:
-      workflow_branch: main
+        env:
+            CCACHE_MAXSIZE: "8G"
+            CMAKE_OPT: >-
+                -DBUILD_DOCS=ON
+                -DBUILD_EXAMPLES=ON
+                -DOPENCV_ENABLE_NONFREE=ON
+                -DWITH_IMGCODEC_GIF=ON
+            MAIN_BUILD_DIR: "${{ (github.event.repository.name != 'opencv_contrib') && 'build' || 'build-contrib' }}"
+            OPENCV_FOR_THREADS_NUM: 4
+            CMAKE_BUILD_PARALLEL_LEVEL: 4
+            IB_ACCEL_DEBUG: 1
 
-  Ubuntu2404-ARM64:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-ARM64.yaml@main
+        steps:
+            - name: Checkout workflow repository
+              uses: actions/checkout@v4
+              with:
+                  repository: opencv/ci-gha-workflow
+                  ref: main
 
-  Ubuntu2404-ARM64-Debug:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-ARM64-Debug.yaml@main
+            - name: Checkout and merge OpenCV
+              uses: ./checkout-and-merge
+              with:
+                  target_branch: "4.x"
+                  author: "${{ github.event.pull_request.user.login }}"
+                  source_branch: "${{ github.head_ref }}"
+                  home: "${{ github.workspace }}"
+                  workdir: "${{ github.workspace }}"
 
-  Ubuntu2004-x64-OpenVINO:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-U20-OpenVINO.yaml@main
+            - name: Create cache directories
+              run: |
+                  mkdir -p "$GITHUB_WORKSPACE/.ccache"
+                  mkdir -p "$GITHUB_WORKSPACE/binaries_cache"
 
-  Ubuntu2004-x64-CUDA:
-    if: "${{ contains(github.event.pull_request.labels.*.name, 'category: dnn') }} || ${{ contains(github.event.pull_request.labels.*.name, 'category: dnn (onnx)') }}"
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-U20-Cuda.yaml@main
+            - if: ${{ github.event.repository.name != 'opencv_contrib' }}
+              name: Configure OpenCV
+              run: |
+                  echo "::group::Configure"
+                  cd "$GITHUB_WORKSPACE"
+                  rm -rf build
+                  mkdir -p build
+                  cmake \
+                    -S opencv \
+                    -B build \
+                    -G Ninja \
+                    ${{ env.CMAKE_OPT }}
+                  echo "::endgroup::"
 
-  macOS-ARM64:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-macOS-ARM64.yaml@main
+            - if: ${{ github.event.repository.name != 'opencv_contrib' }}
+              name: Build OpenCV
+              run: |
+                  set -x
+                  echo "::group::Build"
+                  cd "$GITHUB_WORKSPACE"
+                  cmake --build build 2>&1 | tee build/log.txt
+                  echo "::endgroup::"
 
-  macOS-x64:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-macOS-x86_64.yaml@main
+            - if: ${{ github.event.repository.name != 'opencv_contrib' }}
+              name: Check build warnings
+              run: |
+                  set +e
+                  python3 ./scripts/warnings-handling.py \
+                    "$GITHUB_WORKSPACE/build/log.txt"
+                  if [ $? -ne 0 ]; then
+                    echo "WARNINGS=1" >> $GITHUB_ENV
+                  fi
 
-  macOS-ARM64-Vulkan:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-macOS-ARM64-Vulkan.yaml@main
+            - name: Configure OpenCV with contrib
+              run: |
+                  echo "::group::Configure"
+                  cd "$GITHUB_WORKSPACE"
+                  rm -rf build-contrib
+                  mkdir -p build-contrib
+                  cmake \
+                    -S opencv \
+                    -B build-contrib \
+                    -G Ninja \
+                    -DOPENCV_EXTRA_MODULES_PATH=opencv_contrib/modules \
+                    ${{ env.CMAKE_OPT }}
+                  echo "::endgroup::"
 
-  iOS:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-iOS.yaml@main
+            - name: Build OpenCV with contrib
+              run: |
+                  set -x
+                  echo "::group::Build"
+                  cd "$GITHUB_WORKSPACE"
+                  cmake --build build-contrib 2>&1 | tee build-contrib/log.txt
+                  echo "::endgroup::"
 
-  Android-SDK:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-4.x-Android-SDK.yaml@main
+            - name: Check build-contrib warnings
+              run: |
+                  set +e
+                  python3 ./scripts/warnings-handling.py \
+                    "$GITHUB_WORKSPACE/build-contrib/log.txt"
+                  if [ $? -ne 0 ]; then
+                    echo "WARNINGS=1" >> $GITHUB_ENV
+                  fi
 
-  TIM-VX:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-timvx-backend-tests-4.x.yml@main
-
-  docs:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-docs.yaml@main
-
-  Linux-RISC-V-Clang:
-    uses: opencv/ci-gha-workflow/.github/workflows/OCV-PR-4.x-RISCV.yaml@main
+            - if: ${{ always() && env.WARNINGS == '1' }}
+              name: Warnings check
+              run: |
+                  echo "::error Warnings have been found!"
+                  exit 1
