@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
     Ubuntu:
-        # runs on incredibuild runner after repo is register in the ui
+        # runs on incredibuild runner after repo is register in the ica ui
         runs-on: incredibuild-runner
         permissions:
             contents: read
